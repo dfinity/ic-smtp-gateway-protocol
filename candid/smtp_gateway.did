@@ -1,0 +1,90 @@
+// SMTP Gateway Protocol — Candid API
+//
+// This file defines the interface that a canister must implement
+// in order to receive emails via the SMTP Gateway.
+
+// Examples:
+//   record { name = "From"; value = "alice@example.com" };
+//   record { name = "To"; value = "verify@id.ai" };
+//   record { name = "Subject"; value = "Your verification code" };
+//   record { name = "DKIM-Signature"; value = "v=1; a=rsa-sha256; d=example.com; ..." };
+type Header = record {
+    name : text;
+
+    // The decoded value of the header, as specified by the sender.
+    //
+    // Non-ascii header values must be decoded via RFC 2047 by the caller.
+    //
+    // Example: "José Pérez"
+    value : text;
+};
+
+type Message = record {
+    // Raw RFC 5322 headers
+    headers : vec Header;
+
+    // We do not support MIME, only simple text/plain messages; the body is a blob of bytes.
+    body : blob;
+};
+
+// Represents an email address, e.g., user@domain.
+type Address = record {
+    // The decoded value of the user, as specified on the envelope.
+    //
+    // Non-ascii header values must be decoded via RFC 2047 by the caller.
+    //
+    // Example: "josé.pérez"
+    user : text;
+
+    domain : text;
+};
+
+// Simple email envelope representation
+type Envelope = record {
+    // The envelope sender address.
+    //
+    // More reliable than the "From" header, which can be easily spoofed.
+    from : Address;
+
+    // The envelope recipient address.
+    to : Address;
+};
+
+// May contain only `envelope` if this is a request to `smtp_request_validate`.
+// Otherwise, if this is a request to `smtp_request`, `message` must be set.
+type SmtpRequest = record {
+    message : opt Message;
+
+    // This is typically not available to the email recipient, but is used by the SMTP server
+    // to determine where to send emails.
+    envelope : opt Envelope;
+
+    // Flags set by the gateway, indicating facts about the message.
+    //
+    // For example, there may be a flag to indicate whether a DNSSEC signature was present and valid.
+    gateway_flags : opt vec text;
+};
+
+type SmtpRequestError = record {
+    // SMTP-like error code ranges:
+    // - 400-499: Transient (temporary) errors
+    // - 500-599: Permanent errors
+    code : nat64;
+    message : text;
+};
+
+// Used for logging on the SMTP gateway side.
+type SmtpResponse = variant {
+    Ok : record {};
+    Err : SmtpRequestError;
+};
+
+service : {
+    // Allows to pre-validate an upcoming call to `smtp_request` for optimization purposes.
+    // Note that `smtp_request` should perform at least the same checks as `smtp_request_validate`,
+    // since the former may expire by the time the latter is executed.
+    // For example, this may return `SmtpRequestError { code = 551; message = "User doesn't exist" }`
+    smtp_request_validate : (SmtpRequest) -> (SmtpResponse) query;
+
+    smtp_request : (SmtpRequest) -> (SmtpResponse);
+};

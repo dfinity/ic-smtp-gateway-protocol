@@ -1,0 +1,15 @@
+type Address = record { domain : text; user : text };
+type Envelope = record { to : Address; from : Address };
+type Header = record { value : text; name : text };
+type Message = record { body : blob; headers : vec Header };
+type SmtpRequest = record {
+  envelope : opt Envelope;
+  message : opt Message;
+  gateway_flags : opt vec text;
+};
+type SmtpRequestError = record { code : nat64; message : text };
+type SmtpResponse = variant { Ok : record {}; Err : SmtpRequestError };
+service : {
+  smtp_request : (SmtpRequest) -> (SmtpResponse);
+  smtp_request_validate : (SmtpRequest) -> (SmtpResponse) query;
+}
