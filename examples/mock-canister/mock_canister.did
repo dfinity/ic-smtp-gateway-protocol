@@ -6,6 +6,7 @@ type SmtpRequest = record {
   envelope : opt Envelope;
   message : opt Message;
   gateway_flags : opt vec text;
+  message_id : opt text;
 };
 type SmtpRequestError = record { code : nat64; message : text };
 type SmtpResponse = variant { Ok : record {}; Err : SmtpRequestError };

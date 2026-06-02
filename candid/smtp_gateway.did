@@ -63,6 +63,16 @@ type SmtpRequest = record {
     //
     // For example, there may be a flag to indicate whether a DNSSEC signature was present and valid.
     gateway_flags : opt vec text;
+
+    // Optional gateway-supplied correlation id for a single inbound message
+    // (e.g. the RFC 5322 Message-ID or a gateway-assigned tracking id), so a
+    // reported case can be lined up across the SMTP Gateway logs and the
+    // canister's production logs during support investigations.
+    //
+    // By agreement with the Internet Identity canister this is capped at 256
+    // bytes; the canister rejects oversize values with SMTP reply code 555.
+    // The cap is enforced by the canister, not by this protocol.
+    message_id : opt text;
 };
 
 type SmtpRequestError = record {
