@@ -56,6 +56,8 @@ The full Candid interface is defined in [`candid/smtp_gateway.did`](./candid/smt
 
 ## Contributing
 
+Contributions are welcome! Please read the [contribution guidelines](.github/CONTRIBUTING.md) and the [Code of Conduct](.github/CODE_OF_CONDUCT.md) before opening an issue or pull request.
+
 ### Prerequisites
 
 - [Rust](https://www.rust-lang.org/tools/install) (stable toolchain)
@@ -75,3 +77,11 @@ cargo fmt --check
 cargo clippy -- -D warnings
 cargo test
 ```
+
+## Security
+
+If you believe you have found a security vulnerability, please report it as described in our [security policy](SECURITY.md) instead of opening a public issue.
+
+## License
+
+This project is licensed under the [Apache License, Version 2.0](LICENSE).
