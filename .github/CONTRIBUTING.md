@@ -27,7 +27,7 @@ Before contributing, consider the following:
 
 If you are new to working with GitHub repositories and creating pull requests, consider exploring [First Contributions](https://github.com/firstcontributions/first-contributions) or [How to Contribute to an Open Source Project on GitHub](https://egghead.io/courses/how-to-contribute-to-an-open-source-project-on-github).
 
-# How to make a contribution
+## How to make a contribution
 
 Depending on the type of contribution you want to make, you might follow different workflows.
 
@@ -71,7 +71,7 @@ If you want to submit a pull request to fix an issue or add a feature, here's a 
    ```shell
    git push origin my-branch-name-here
    ```
-10. Create a new pull request (PR) for the branch you pushed to the upstream GitHub repository.
+10. Create a new pull request (PR) in the upstream GitHub repository from the branch you pushed to your fork.
     - The PR title should be auto-populated based on your commit message.
     - Provide a PR message that includes a short description of the changes made.
 11. Wait for the pull request to be reviewed.

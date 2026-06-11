@@ -3,7 +3,7 @@
 DFINITY takes the security of our software products seriously, which includes all source code repositories under the [DFINITY](https://github.com/dfinity) GitHub organization.
 
 > [!IMPORTANT]
-> [DFINITY Foundation](https://dfinity.org) has a [Internet Computer (ICP) Bug Bounty program](https://dfinity.org/bug-bounty/) that rewards researchers for finding and reporting vulnerabilities in the Internet Computer. Please check the scope and eligibility criteria outlined in the policy to see if the vulnerability you found qualifies for a reward.
+> [DFINITY Foundation](https://dfinity.org) has an [Internet Computer (ICP) Bug Bounty program](https://dfinity.org/bug-bounty/) that rewards researchers for finding and reporting vulnerabilities in the Internet Computer. Please check the scope and eligibility criteria outlined in the policy to see if the vulnerability you found qualifies for a reward.
 
 ## How to report a vulnerability
 
@@ -12,7 +12,7 @@ If you believe you have found a security vulnerability in any of our repositorie
 
 1. **Do not disclose the vulnerability publicly.** Public disclosure could be exploited by attackers before it can be fixed.
 2. **Ideally, disclose the vulnerability through [Hackenproof](https://hackenproof.com/programs/internet-computer-protocol)**
-    * Hackenproof facilitates disclosure and streamlines Bugbounty payouts.
+    * Hackenproof facilitates disclosure and streamlines bug bounty payouts.
 3. **Alternatively, send an email to securitybugs@dfinity.org.** Please include the following information in your email:
     * A description of the vulnerability
     * Steps to reproduce the vulnerability
