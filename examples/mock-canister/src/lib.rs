@@ -29,6 +29,7 @@ struct SmtpRequest {
     message: Option<Message>,
     envelope: Option<Envelope>,
     gateway_flags: Option<Vec<String>>,
+    message_id: Option<String>,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
