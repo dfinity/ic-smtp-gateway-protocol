@@ -46,8 +46,12 @@ type Envelope = record {
     // More reliable than the "From" header, which can be easily spoofed.
     from : Address;
 
-    // The envelope recipient address.
-    to : Address;
+    // The envelope recipient addresses.
+    //
+    // A single delivery can carry several recipients: when more than one
+    // recipient of a message resolves to the same canister, the gateway sends
+    // one request listing them all rather than one request per recipient.
+    to : vec Address;
 };
 
 // May contain only `envelope` if this is a request to `smtp_request_validate`.
@@ -63,12 +67,44 @@ type SmtpRequest = record {
     //
     // For example, there may be a flag to indicate whether a DNSSEC signature was present and valid.
     gateway_flags : opt vec text;
+
+    // Gateway-assigned identifier for one delivery attempt.
+    //
+    // Two roles:
+    //
+    //  * correlation, so a reported case can be lined up across the gateway's
+    //    logs and the canister's;
+    //  * the assembly key for the chunked upload protocol below, where it ties
+    //    `smtp_upload_chunk` calls to the `smtp_upload_commit` that finalizes
+    //    them. For that it must be unique per delivery attempt, and canisters
+    //    must key upload state on `message_id`.
+    message_id : opt text;
 };
 
 type SmtpRequestError = record {
-    // SMTP-like error code ranges:
-    // - 400-499: Transient (temporary) errors
-    // - 500-599: Permanent errors
+    // SMTP reply code. The gateway acts on the CLASS of this code:
+    //
+    // - 400-499: transient. The gateway reports a temporary failure and the
+    //            sending MTA retries the message later.
+    // - 500-599: permanent. The gateway bounces the message.
+    //
+    // A deterministic error reported outside the 5xx range therefore causes the
+    // sender to retry forever, so pick the class deliberately.
+    //
+    // 550 is reserved: the gateway reads it as "unknown mailbox" and rejects
+    // that one recipient during RCPT TO, rather than failing the message.
+    //
+    // Codes this protocol expects:
+    //
+    //   550  no such mailbox                      permanent
+    //   501  malformed request (missing fields)    permanent
+    //   552  message exceeds the advertised limit  permanent
+    //   504  unsupported upload protocol version   permanent
+    //   554  digest mismatch / malformed chunk     permanent
+    //   555  message_id exceeds the agreed cap     permanent
+    //   450  upload unknown, incomplete, or a
+    //        message_id collision                  transient
+    //   452  too many uploads / out of buffer      transient
     code : nat64;
     message : text;
 };
@@ -79,12 +115,203 @@ type SmtpResponse = variant {
     Err : SmtpRequestError;
 };
 
+// ===========================================================================
+// Chunked upload
+// ===========================================================================
+//
+// An ingress message to the Internet Computer is capped at roughly 2 MiB, so a
+// message larger than that cannot be delivered with a single `smtp_request`.
+// Such a message is instead uploaded as a series of body slices
+// (`smtp_upload_chunk`) and then finalized with one `smtp_upload_commit`.
+//
+// The gateway only uses this protocol against a canister that has explicitly
+// advertised support through `smtp_capabilities`. A canister that does not
+// implement these methods keeps working exactly as before; oversize mail
+// addressed to it is refused with a clear error instead, and the sending MTA
+// receives a normal bounce. Implementing them is therefore optional.
+//
+// Chunks are self-describing: every field except `headers` and `gateway_flags`
+// is repeated in each one. That lets the canister create the upload from
+// whichever chunk arrives first - the gateway submits them concurrently and
+// they can arrive in any order - and makes re-sending a chunk harmless.
+//
+// A canister implementing this MUST:
+//
+//  * reject a `version` it does not implement (504), on both the chunk and the
+//    commit. This is the only extension point: a future revision bumps the
+//    version, and a canister that ignores the field would silently
+//    misinterpret the new shape;
+//  * recompute `SHA256(payload)` and compare it against `payload_sha256`
+//    BEFORE storing the chunk, so a corrupt transfer costs one chunk rather
+//    than the whole upload;
+//  * check that `total_chunks == ceil(body_size / chunk_size)` and that
+//    `index < total_chunks`, and bound the index before using it in offset
+//    arithmetic - otherwise a malformed chunk can force an enormous allocation
+//    or an arithmetic trap;
+//  * key upload state on `message_id`, and reject a chunk that
+//    disagrees with the upload already in progress (450, transient - a
+//    collision is worth retrying, not bouncing);
+//  * derive the commit digest from the payloads it actually stored, NOT from
+//    the `payload_sha256` values the caller supplied. A digest the caller
+//    asserted proves nothing about the bytes the canister holds;
+//  * keep the upload intact when a commit fails validation - the missing
+//    chunks may still arrive;
+//  * make `smtp_upload_commit` IDEMPOTENT by retaining the terminal verdict per
+//    `message_id` and returning it for a repeated commit. If the
+//    reply to a commit is lost, the gateway cannot tell whether the message was
+//    delivered; without the retained verdict the retry reports failure, the
+//    sending MTA re-sends, and the message is delivered twice;
+//  * authorize the caller by RETURNING 530, not by trapping. A trap is
+//    reported as a transient failure, so an unauthorized sender would retry
+//    forever instead of being rejected;
+//  * bound its own resources: cap concurrent uploads and buffered bytes per
+//    caller (452 when over), and expire uploads that are never committed.
+
+// What a canister is willing to accept.
+//
+// Both fields must be present and usable for the gateway to use the chunked
+// protocol; it fails closed, treating anything else as a canister that only
+// supports single-call delivery.
+type SmtpCapabilities = record {
+    // Highest upload protocol version implemented. Absent means none.
+    upload_protocol_version : opt nat32;
+
+    // Largest message accepted, in bytes, counting the header block and the
+    // body together. Advertise only what is actually enforced.
+    max_message_size : opt nat64;
+};
+
+// One slice of the message body.
+//
+// Unlike `SmtpRequest`, the fields here are NOT `opt`. That is deliberate: an
+// all-`opt` record is a Candid supertype of any record, so a malformed payload
+// would decode into an empty upload instead of being rejected. Required fields
+// make it a loud decode failure. The protocol can therefore only be extended
+// by appending `opt` fields, gated on `version`.
+type SmtpUploadChunk = record {
+    // Must be a version the canister implements.
+    version : nat32;
+
+    // Assembly key; the same value as `SmtpRequest.message_id`.
+    message_id : text;
+
+    // Identical in every chunk of one upload, which lets the canister validate
+    // recipients from whichever chunk arrives first.
+    envelope : Envelope;
+
+    // 0-based, and always less than `total_chunks`.
+    index : nat32;
+
+    total_chunks : nat32;
+
+    // Payload length of every chunk except the last, so the canister can
+    // derive `offset = index * chunk_size`. Identical in every chunk.
+    chunk_size : nat64;
+
+    // Total body length. Identical in every chunk.
+    body_size : nat64;
+
+    // SHA-256 of `payload`, 32 bytes. Verified before the payload is stored.
+    payload_sha256 : blob;
+
+    // body[index * chunk_size .. min((index + 1) * chunk_size, body_size)]
+    payload : blob;
+
+    // The RFC 5322 header block, carried on the first chunk only. Headers are
+    // never split across chunks.
+    headers : opt vec Header;
+
+    // As `SmtpRequest.gateway_flags`; first chunk only.
+    gateway_flags : opt vec text;
+};
+
+// Reply to an accepted chunk.
+//
+// Deliberately carries no verdict about the message: a chunk acknowledgement
+// must never be mistaken for a delivery. Only `smtp_upload_commit` delivers.
+type SmtpUploadChunkOk = record {
+    // Distinct chunk indices the canister now holds for this upload.
+    chunks_received : nat32;
+};
+
+type SmtpUploadChunkResponse = variant {
+    Ok : SmtpUploadChunkOk;
+    Err : SmtpRequestError;
+};
+
+// Finalizes an upload. The only call that delivers a chunked message.
+type SmtpUploadCommit = record {
+    version : nat32;
+    message_id : text;
+
+    // SHA-256 over the concatenation of the per-chunk payload digests, in
+    // ascending index order: SHA256(d_0 || d_1 || .. || d_n-1), where
+    // d_i = SHA256(payload_i).
+    //
+    // Hashing 32 bytes per chunk rather than re-reading the whole body, while
+    // still binding every byte transitively through the per-chunk digests the
+    // canister verified on arrival.
+    //
+    // This is a TRANSFER integrity check, not a content identity: it depends on
+    // `chunk_size`, so two senders slicing the same body differently produce
+    // different values. Do not use it to deduplicate mail.
+    body_sha256 : blob;
+
+    total_chunks : nat32;
+};
+
+// Names an existing upload.
+type SmtpUploadId = record { message_id : text };
+
+// State of an upload.
+//
+// Consulted when the reply to a commit was lost and the gateway cannot tell
+// whether the message was delivered. Flags plus `opt` rather than a variant,
+// because this travels canister to gateway, where adding a variant case later
+// would break older gateways; records grow safely by appending `opt` fields.
+type SmtpUploadStatus = record {
+    // An upload or a retained verdict exists for message_id.
+    known : bool;
+
+    // The upload was committed; `result` holds the terminal verdict.
+    committed : bool;
+
+    // Present only when `committed`.
+    result : opt SmtpResponse;
+};
+
+type SmtpUploadStatusResponse = variant {
+    Ok : SmtpUploadStatus;
+    Err : SmtpRequestError;
+};
+
 service : {
     // Allows to pre-validate an upcoming call to `smtp_request` for optimization purposes.
     // Note that `smtp_request` should perform at least the same checks as `smtp_request_validate`,
     // since the former may expire by the time the latter is executed.
-    // For example, this may return `SmtpRequestError { code = 551; message = "User doesn't exist" }`
+    // For example, this may return `SmtpRequestError { code = 550; message = "User doesn't exist" }`
     smtp_request_validate : (SmtpRequest) -> (SmtpResponse) query;
 
     smtp_request : (SmtpRequest) -> (SmtpResponse);
+
+    // --- Chunked upload. Optional; see the section above. ---
+
+    // What this canister is willing to accept. A canister that does not export
+    // this method is treated as supporting single-call delivery only.
+    smtp_capabilities : () -> (SmtpCapabilities) query;
+
+    // Uploads one slice of the body. Idempotent in (message_id, index).
+    smtp_upload_chunk : (SmtpUploadChunk) -> (SmtpUploadChunkResponse);
+
+    // Finalizes an upload and delivers the message. Must be idempotent.
+    smtp_upload_commit : (SmtpUploadCommit) -> (SmtpResponse);
+
+    // Reports whether an upload exists and whether it was committed. A query on
+    // purpose: it is consulted exactly when a commit's outcome is unknown, where
+    // another update call would be just as ambiguous.
+    smtp_upload_status : (SmtpUploadId) -> (SmtpUploadStatusResponse) query;
+
+    // Releases an upload the gateway has given up on. Best-effort - the canister
+    // expires uploads on its own - and idempotent.
+    smtp_upload_abort : (SmtpUploadId) -> (SmtpResponse);
 };

@@ -1,15 +1,167 @@
+// Candid `Address`.
 type Address = record { domain : text; user : text };
-type Envelope = record { to : Address; from : Address };
+// What the canister actually received, as reported by `mock_delivered`.
+// 
+// `body_sha256` is a plain `SHA256` over the reassembled body, computed here -
+// it is deliberately NOT an echo of `SmtpUploadCommit::body_sha256` (which
+// hashes the chunk digests). Echoing that value would only assert that the
+// gateway agrees with itself; hashing the body independently is what makes the
+// test end to end.
+type Delivered = record {
+  via : DeliveryPath;
+  envelope : Envelope;
+  body_suffix : blob;
+  // First/last 64 bytes, so a digest mismatch is debuggable: "prefix matches,
+  // suffix does not" points straight at a truncated final chunk.
+  body_prefix : blob;
+  chunks_seen : nat32;
+  headers : vec Header;
+  gateway_flags : opt vec text;
+  body_sha256 : blob;
+  body_len : nat64;
+};
+// Which path a delivered message arrived by.
+type DeliveryPath = variant { Chunked; SingleShot };
+// Candid `Envelope`.
+type Envelope = record { to : vec Address; from : Address };
+// Candid `Header`.
 type Header = record { value : text; name : text };
+// Fields are deliberately required rather than `opt`: a rename then fails at
+// install time instead of silently arriving as `None`.
+type InitArg = record {
+  // Advertised via `smtp_capabilities` and enforced on arrival.
+  max_message_size : nat64;
+  max_open_uploads : nat32;
+  upload_ttl_secs : nat64;
+  // The only principal allowed to call the SMTP methods.
+  authorized : principal;
+  max_buffered_bytes : nat64;
+  // Local parts this canister accepts mail for, e.g. `["jane", "john"]`.
+  mailboxes : vec text;
+};
+// Candid `Message`.
 type Message = record { body : blob; headers : vec Header };
+// What a canister is willing to accept.
+// Returned by `smtp_capabilities`.
+type SmtpCapabilities = record {
+  // Largest raw message (header block plus body) accepted, in bytes
+  max_message_size : opt nat64;
+  // Highest upload-protocol version implemented
+  upload_protocol_version : opt nat32;
+};
+// Candid `SmtpRequest`.
 type SmtpRequest = record {
   envelope : opt Envelope;
   message : opt Message;
   gateway_flags : opt vec text;
+  message_id : opt text;
 };
+// Candid `SmtpRequestError` (`code` is `nat64` on the wire in typical canisters).
 type SmtpRequestError = record { code : nat64; message : text };
+// Candid `SmtpResponse` — `Ok` carries an empty record.
 type SmtpResponse = variant { Ok : record {}; Err : SmtpRequestError };
-service : {
+// One chunk of the message body.
+// 
+// Every field except `headers` and `gateway_flags` is repeated in every chunk,
+// which makes the chunk idempotent and lets the canister build the upload from
+// whichever chunk arrives first.
+type SmtpUploadChunk = record {
+  // SMTP envelope.
+  // Identical in every chunk of one upload
+  envelope : Envelope;
+  // Total number of chunks
+  total_chunks : nat32;
+  // Total body length
+  body_size : nat64;
+  // SHA-256 of the `payload` field, 32 bytes
+  payload_sha256 : blob;
+  // Message headers - filled only in the first chunk
+  headers : opt vec Header;
+  // Must be `SMTP_UPLOAD_PROTOCOL_VERSION`.
+  version : nat32;
+  // Gateway flags, also only in the first chunk
+  gateway_flags : opt vec text;
+  // Index of this chunk
+  index : nat32;
+  // Assembly key.
+  // Uses the same value as `SmtpRequest::message_id` (UUID).
+  message_id : text;
+  // Payload length of every chunk except the last. Identical in every chunk,
+  // so the canister can derive `offset = index * chunk_size`.
+  chunk_size : nat64;
+  // Chunk payload
+  payload : blob;
+};
+// Reply payload for an accepted chunk
+type SmtpUploadChunkOk = record {
+  // Number of total chunks received so far.
+  chunks_received : nat32;
+};
+// Response to `smtp_upload_chunk` request
+type SmtpUploadChunkResponse = variant {
+  Ok : SmtpUploadChunkOk;
+  Err : SmtpRequestError;
+};
+// Finalizes an upload
+type SmtpUploadCommit = record {
+  total_chunks : nat32;
+  // Must be `SMTP_UPLOAD_PROTOCOL_VERSION`
+  version : nat32;
+  // SHA-256 over the concatenation of every chunk's payload digest in index
+  // order: `SHA256(d_0 || d_1 || .. || d_{n-1})` where `d_i = SHA256(payload_i)`.
+  // 
+  // A poor-man's Merkle tree: it lets the canister verify the whole body by
+  // hashing `32 * total_chunks` bytes instead of re-reading the message.
+  body_sha256 : blob;
+  message_id : text;
+};
+// Identifies an existing upload.
+// Used by `smtp_upload_status` and `smtp_upload_abort`.
+type SmtpUploadId = record { message_id : text };
+// State of an upload, as reported by `smtp_upload_status`.
+type SmtpUploadStatus = record {
+  // `Some` only if `committed`
+  result : opt SmtpResponse;
+  // The upload was committed,
+  // `result` holds the outcome.
+  committed : bool;
+  // An open upload exists for message_id
+  known : bool;
+};
+// Response to `smtp_upload_status`.
+type SmtpUploadStatusResponse = variant {
+  Ok : SmtpUploadStatus;
+  Err : SmtpRequestError;
+};
+type Stats = record {
+  rejected : nat64;
+  delivered : nat64;
+  open_uploads : nat64;
+  reserved_bytes : nat64;
+};
+service : (InitArg) -> {
+  // Raw bytes of a delivered body, for comparing directly when a digest fails.
+  mock_body_range : (text, nat64, nat64) -> (opt blob) query;
+  // What was delivered under `message_id`, as the canister saw it.
+  mock_delivered : (text) -> (opt Delivered) query;
+  mock_stats : () -> (Stats) query;
+  smtp_capabilities : () -> (SmtpCapabilities) query;
+  // Delivers a message that fits into a single ingress message.
+  // 
+  // Deduplicated by `(caller, message_id)` for the same reason commit is: the
+  // gateway has no ambiguity handling on this path, so a lost reply would
+  // otherwise become a duplicate delivery when the sending MTA retries.
   smtp_request : (SmtpRequest) -> (SmtpResponse);
+  // Probes whether a recipient is deliverable, during RCPT TO.
+  // 
+  // Must be a query - the gateway calls it as one.
+  // 
+  // Note the gateway sends `message: None` and `message_id: None` here, so this
+  // must not require them. Code `550` means "unknown mailbox" specifically; the
+  // gateway turns it into `550 5.1.2` for that recipient alone.
   smtp_request_validate : (SmtpRequest) -> (SmtpResponse) query;
+  smtp_upload_abort : (SmtpUploadId) -> (SmtpResponse);
+  smtp_upload_chunk : (SmtpUploadChunk) -> (SmtpUploadChunkResponse);
+  smtp_upload_commit : (SmtpUploadCommit) -> (SmtpResponse);
+  smtp_upload_status : (SmtpUploadId) -> (SmtpUploadStatusResponse) query;
 }
