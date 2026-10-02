@@ -56,7 +56,7 @@ type SmtpRequest = record {
   gateway_flags : opt vec text;
   message_id : opt text;
 };
-// Candid `SmtpRequestError` (`code` is `nat64` on the wire in typical canisters).
+// Candid `SmtpRequestError`.
 type SmtpRequestError = record { code : nat64; message : text };
 // Candid `SmtpResponse` — `Ok` carries an empty record.
 type SmtpResponse = variant { Ok : record {}; Err : SmtpRequestError };
