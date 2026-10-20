@@ -1,0 +1,16 @@
+[package]
+name = "ic-smtp-gateway-protocol"
+description = "Rust definitions of the Internet Computer SMTP Gateway Protocol"
+documentation = "https://docs.rs/ic-smtp-gateway-protocol"
+readme = "../../README.md"
+keywords = ["internet-computer", "icp", "dfinity", "smtp", "email"]
+categories = ["api-bindings", "email"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+candid = { workspace = true }
+serde = { workspace = true }
+sha2 = { workspace = true }

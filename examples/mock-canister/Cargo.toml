@@ -1,14 +1,25 @@
 [package]
 name = "mock-canister"
-version = "0.1.0"
-edition = "2021"
-license = "Apache-2.0"
+description = "Example canister implementing the IC SMTP Gateway Protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Example only - this is not published or deployed.
 publish = false
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-candid = "0.10"
-ic-cdk = "0.20"
-serde = { version = "1", features = ["derive"] }
+candid = { workspace = true }
+ic-cdk = { workspace = true }
+ic-smtp-gateway-protocol = { workspace = true }
+# Needed even though `candid::Deserialize` is a re-export: the `CandidType`
+# derive expands to code that refers to `::serde` by path.
+serde = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+candid_parser = { workspace = true }
