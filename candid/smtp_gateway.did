@@ -54,8 +54,8 @@ type Envelope = record {
     to : vec Address;
 };
 
-// May contain only `envelope` if this is a request to `smtp_request_validate`.
-// Otherwise, if this is a request to `smtp_request`, `message` must be set.
+// A request to `smtp_request_validate` carries only `envelope`. A request to
+// `smtp_request` carries `envelope`, `message` and `message_id`.
 type SmtpRequest = record {
     message : opt Message;
 
@@ -78,6 +78,11 @@ type SmtpRequest = record {
     //    `smtp_upload_chunk` calls to the `smtp_upload_commit` that finalizes
     //    them. For that it must be unique per delivery attempt, and canisters
     //    must key upload state on `message_id`.
+    //
+    // The gateway always sets it on `smtp_request` and never on
+    // `smtp_request_validate`, which shares this record - that is the only
+    // reason it is `opt`. A canister may reject an `smtp_request` without it
+    // (501).
     message_id : opt text;
 };
 

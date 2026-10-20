@@ -176,6 +176,20 @@ fn check_envelope(cfg: &InitArg, envelope: &Envelope) -> Result<(), SmtpRequestE
     Ok(())
 }
 
+/// Size of a message as `max_message_size` counts it: header block plus body.
+///
+/// Header values arrive decoded, so the block is re-serialized as
+/// `Name: value\r\n` per header plus the blank line ending it. That
+/// approximates the raw bytes rather than reproducing them, which is close
+/// enough to enforce a size cap.
+fn message_size(headers: &[Header], body_len: u64) -> u64 {
+    headers
+        .iter()
+        .map(|h| h.name.len() as u64 + h.value.len() as u64 + 4)
+        .fold(2, u64::saturating_add)
+        .saturating_add(body_len)
+}
+
 /// Drops uploads whose TTL has passed.
 ///
 /// Swept when admission control is about to refuse rather than only on access,
@@ -197,6 +211,10 @@ fn sweep_expired(state: &mut State, now: u64) {
     });
     state.reserved_bytes = state.reserved_bytes.saturating_sub(freed);
 
+    // Verdicts share the upload TTL but count from completion, so each one
+    // outlives its commit by a full TTL. It only has to last until the gateway
+    // has resolved a commit whose reply it lost, so `upload_ttl_secs` must
+    // exceed the gateway's commit retry window.
     state
         .completed
         .retain(|_, c| now.saturating_sub(c.at_secs) < ttl);
@@ -287,7 +305,7 @@ fn smtp_request(req: SmtpRequest) -> SmtpResponse {
             return reject(state, SmtpResponse::Err(e));
         }
 
-        if message.body.len() as u64 > cfg.max_message_size {
+        if message_size(&message.headers, message.body.len() as u64) > cfg.max_message_size {
             return err_response(state, 552, "message exceeds the advertised maximum size");
         }
 
@@ -414,6 +432,16 @@ fn smtp_upload_chunk(chunk: SmtpUploadChunk) -> SmtpUploadChunkResponse {
             return err_chunk(state, 552, "message exceeds the advertised maximum size");
         }
 
+        // The limit counts the header block too, which only the first chunk
+        // carries. Commit cannot succeed without that chunk, so checking it
+        // here covers the whole upload.
+        if chunk.index == 0 {
+            let headers = chunk.headers.as_deref().unwrap_or_default();
+            if message_size(headers, chunk.body_size) > cfg.max_message_size {
+                return err_chunk(state, 552, "message exceeds the advertised maximum size");
+            }
+        }
+
         // `usize` is 32 bits on wasm32, so converting explicitly rather than
         // casting: a silent truncation here would allocate a short buffer and
         // then panic on the write below, and a trap reads as a *temporary*
@@ -485,9 +513,23 @@ fn smtp_upload_chunk(chunk: SmtpUploadChunk) -> SmtpUploadChunkResponse {
             return err_chunk(state, 450, "chunk does not match the upload in progress");
         }
 
-        if chunk.index == 0 {
-            up.headers.clone_from(&chunk.headers);
-            up.gateway_flags.clone_from(&chunk.gateway_flags);
+        let slot = chunk.index as usize;
+
+        // Idempotent in (message_id, index): a resend must match what is
+        // already stored and changes nothing. A different payload, or different
+        // headers on the first chunk, is another message under the same
+        // message_id - overwriting would splice the two together.
+        if let Some(prev) = up.digests[slot] {
+            let same = prev == digest
+                && (chunk.index != 0
+                    || (up.headers == chunk.headers && up.gateway_flags == chunk.gateway_flags));
+            if !same {
+                return err_chunk(state, 450, "chunk does not match the upload in progress");
+            }
+
+            return SmtpUploadChunkResponse::Ok(SmtpUploadChunkOk {
+                chunks_received: up.received,
+            });
         }
 
         let Some(end) = offset
@@ -500,11 +542,12 @@ fn smtp_upload_chunk(chunk: SmtpUploadChunk) -> SmtpUploadChunkResponse {
         };
         up.buf[offset..end].copy_from_slice(&chunk.payload);
 
-        // Idempotent: re-sending a chunk overwrites identical bytes.
-        if up.digests[chunk.index as usize].is_none() {
-            up.received += 1;
+        if chunk.index == 0 {
+            up.headers = chunk.headers;
+            up.gateway_flags = chunk.gateway_flags;
         }
-        up.digests[chunk.index as usize] = Some(digest);
+        up.digests[slot] = Some(digest);
+        up.received += 1;
 
         SmtpUploadChunkResponse::Ok(SmtpUploadChunkOk {
             chunks_received: up.received,
@@ -770,6 +813,22 @@ mod tests {
             "Generated Candid does not match mock_canister.did. \
              Re-run with UPDATE_DID=1 to regenerate it."
         );
+    }
+
+    #[test]
+    fn message_size_counts_the_header_block() {
+        // Just the blank line ending the (empty) header block.
+        assert_eq!(message_size(&[], 10), 12);
+
+        let headers = [Header {
+            name: "Subject".into(),
+            value: "hi".into(),
+        }];
+        // "Subject: hi\r\n" + "\r\n" + body
+        assert_eq!(message_size(&headers, 10), 13 + 2 + 10);
+
+        // Saturates rather than wrapping past the cap.
+        assert_eq!(message_size(&headers, u64::MAX), u64::MAX);
     }
 
     /// This canister must be a valid server for any client written against the
