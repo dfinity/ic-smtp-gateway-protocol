@@ -557,17 +557,18 @@ mod test {
     // Chunked upload protocol
     // -----------------------------------------------------------------------
 
-    /// `SmtpUploadChunk` with `index` widened to `nat64`. The field is not
-    /// wrapped in `opt`, so this must be a hard decode failure rather than a
-    /// silently-recovered `None` - that is the whole reason the upload types
-    /// use required fields.
+    /// `SmtpUploadChunk` with the type of `index` as a parameter. With `u32` it
+    /// is wire-identical to the real type; with `u64` the field is widened to
+    /// `nat64`. The field is not wrapped in `opt`, so the latter must be a hard
+    /// decode failure rather than a silently-recovered `None` - that is the
+    /// whole reason the upload types use required fields.
     #[derive(Clone, Debug, CandidType, Deserialize, Eq, PartialEq)]
-    struct SmtpUploadChunkWideIndex {
+    struct SmtpUploadChunkMirror<I> {
         version: u32,
         message_id: String,
         envelope: Envelope,
-        index: u64,
-        total: u32,
+        index: I,
+        total_chunks: u32,
         chunk_size: u64,
         body_size: u64,
         payload_sha256: Vec<u8>,
@@ -731,22 +732,30 @@ mod test {
     /// and the canister would silently see a chunk with no index.
     #[test]
     fn test_upload_chunk_counter_widths_are_exact() {
-        let c = chunk();
-        let wide = SmtpUploadChunkWideIndex {
-            version: c.version,
-            message_id: c.message_id.clone(),
-            envelope: c.envelope.clone(),
-            index: u64::from(c.index),
-            total: c.total_chunks,
-            chunk_size: c.chunk_size,
-            body_size: c.body_size,
-            payload_sha256: c.payload_sha256.clone(),
-            payload: c.payload,
-            headers: None,
-            gateway_flags: None,
-        };
+        fn mirror<I>(c: &SmtpUploadChunk, index: I) -> SmtpUploadChunkMirror<I> {
+            SmtpUploadChunkMirror {
+                version: c.version,
+                message_id: c.message_id.clone(),
+                envelope: c.envelope.clone(),
+                index,
+                total_chunks: c.total_chunks,
+                chunk_size: c.chunk_size,
+                body_size: c.body_size,
+                payload_sha256: c.payload_sha256.clone(),
+                payload: c.payload.clone(),
+                headers: c.headers.clone(),
+                gateway_flags: c.gateway_flags.clone(),
+            }
+        }
 
-        let b = Encode!(&wide).unwrap();
+        let c = chunk();
+
+        // Control: at the declared width the mirror decodes, so the failure
+        // below is down to the index width and not to a drifted field name.
+        let b = Encode!(&mirror(&c, c.index)).unwrap();
+        assert_eq!(Decode!(&b, SmtpUploadChunk).unwrap(), c);
+
+        let b = Encode!(&mirror(&c, u64::from(c.index))).unwrap();
         assert!(
             Decode!(&b, SmtpUploadChunk).is_err(),
             "nat64 index must not decode as nat32"
