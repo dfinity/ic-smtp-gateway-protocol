@@ -56,7 +56,7 @@ The SMTP methods are public canister methods: any principal can call them, not o
 
 ### What a canister receives
 
-- **Headers are raw.** Each `Header.value` is the field body exactly as sent: the leading space, the terminating CRLF, folded lines and RFC 2047 encoded words are all kept. This preserves what a DKIM signature covers. Header names keep the sender's case.
+- **Header values are raw, header names are not.** Each `Header.value` is the field body exactly as sent: the leading space, the terminating CRLF, folded lines and RFC 2047 encoded words are all kept. Names the gateway recognizes are normalized to canonical case (`fRoM` arrives as `From`), so compare names case-insensitively, and verify DKIM with `relaxed` header canonicalization: the original header bytes cannot always be reconstructed. A header whose value is not valid UTF-8 is omitted.
 - **The body is raw.** The bytes after the header block, without any MIME processing.
 - **`message_id` identifies one delivery attempt, not one email.** A retry by the sending server arrives with a new `message_id`, so delivery is at-least-once.
 - **`gateway_flags` is reserved.** No flags are defined yet, and the Gateway does not set it.

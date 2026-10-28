@@ -3,7 +3,7 @@
 // This file defines the interface that a canister must implement
 // in order to receive emails via the SMTP Gateway.
 
-// One header field, exactly as it appeared in the message.
+// One header field of the message.
 //
 // Examples (the leading space and the line ending are part of the value):
 //   record { name = "From"; value = " alice@example.com\r\n" };
@@ -11,23 +11,28 @@
 //   record { name = "Subject"; value = " =?UTF-8?Q?Jos=C3=A9?= sent you a code\r\n" };
 //   record { name = "DKIM-Signature"; value = " v=1; a=rsa-sha256; d=example.com; ...\r\n" };
 type Header = record {
-    // The field name as it appears in the message. Compare it
+    // The field name. Names the gateway's parser recognizes (From, To,
+    // Subject, DKIM-Signature, ...) are normalized to their canonical case, so
+    // "fRoM" arrives as "From"; other names arrive as sent. Compare names
     // case-insensitively.
     name : text;
 
     // The raw field body: everything after the colon, up to and including the
     // line ending that terminates the field. Leading whitespace, folded
     // continuation lines and RFC 2047 encoded words are passed through as they
-    // are; nothing is trimmed, unfolded or decoded.
+    // are; nothing is trimmed, unfolded or decoded. Trim, unfold and decode on
+    // the canister side where needed.
     //
-    // Raw on purpose: DKIM signs the header bytes as sent, so a canister that
-    // verifies DKIM needs them unmodified. Trim, unfold and decode on the
-    // canister side where needed.
+    // Values are raw so that a canister can verify DKIM. Because names may be
+    // normalized, the original header bytes cannot always be reconstructed:
+    // verify with DKIM's `relaxed` header canonicalization, which lowercases
+    // names. `simple` canonicalization cannot be verified reliably.
     value : text;
 };
 
 type Message = record {
-    // The header fields in message order. Duplicates are kept.
+    // The header fields in message order. Duplicates are kept. A field whose
+    // value is not valid UTF-8 is omitted.
     headers : vec Header;
 
     // The raw body: every byte after the blank line that ends the header
@@ -127,6 +132,10 @@ type SmtpRequestError = record {
     // call. A deterministic error reported outside the 5xx range, or by
     // trapping, therefore causes the sender to retry until it gives up, so
     // return an error with a deliberately chosen class instead.
+    //
+    // Two call failures are permanent instead: the canister does not export
+    // the method (it does not implement the protocol), and the request is too
+    // large for a single ingress message (HTTP 413).
     //
     // 550 is reserved: the gateway reads it as "unknown mailbox" and rejects
     // that one recipient during RCPT TO, rather than failing the message.
