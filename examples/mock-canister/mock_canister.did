@@ -148,9 +148,8 @@ service : (InitArg) -> {
   smtp_capabilities : () -> (SmtpCapabilities) query;
   // Delivers a message that fits into a single ingress message.
   // 
-  // Deduplicated by `(caller, message_id)` for the same reason commit is: the
-  // gateway has no ambiguity handling on this path, so a lost reply would
-  // otherwise become a duplicate delivery when the sending MTA retries.
+  // A repeated call with the same `(caller, message_id)` returns the retained
+  // verdict. MTA retries are not caught: they arrive with a new `message_id`.
   smtp_request : (SmtpRequest) -> (SmtpResponse);
   // Probes whether a recipient is deliverable, during RCPT TO.
   // 

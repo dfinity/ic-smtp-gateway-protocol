@@ -15,15 +15,15 @@ The goal is to establish email as a first-class, asynchronous communication chan
 │ User │ ──────────►  │ SMTP Gateway │ ─────────────► │  Boundary Node  │ ──► │ IC Canister │
 └──────┘              └──────────────┘                └─────────────────┘     └─────────────┘
                         │                                                         │
-                        ◄── bounce ───────────────────────────────────────────────┘
-                            (on error)
+                        ◄── reply ────────────────────────────────────────────────┘
+                            (5xx: sender bounces, 4xx: sender retries)
 ```
 
 1. A user sends an email to a canister address (e.g., `user@rdmx6-jaaaa-aaaaa-aaadq-cai.icp0.io` or `user@id.ai`).
 2. The **SMTP Gateway** receives and validates the email.
-3. The Gateway calls `smtp_request_validate` (query) to pre-validate the request.
-4. If validation succeeds, the Gateway calls `smtp_request` (update) to deliver the message.
-5. On error, the Gateway logs the failure and performs a best-effort bounce.
+3. During `RCPT TO`, the Gateway calls `smtp_request_validate` (query) once per recipient to check that the recipient is deliverable.
+4. After the message is transferred, the Gateway calls `smtp_request` (update) once per destination canister to deliver it.
+5. The Gateway answers the sending mail server within the SMTP session: success, a temporary failure (the sender retries later), or a permanent failure (the sender bounces the message to its author). The Gateway does not generate bounce messages itself.
 
 ### Large messages
 
@@ -41,8 +41,25 @@ Implementing it is **optional**. A canister that does not is unaffected: it keep
 
 Canisters can be addressed in two ways:
 
-- **Via canister ID**: `user@<canister-id>.icp0.io` (e.g., `user@rdmx6-jaaaa-aaaaa-aaadq-cai.icp0.io`)
-- **Via custom domain**: `user@<custom-domain>` (e.g., `user@id.ai`)
+- **Via canister ID**: `user@<canister-id>.icp0.io` (e.g., `user@rdmx6-jaaaa-aaaaa-aaadq-cai.icp0.io`). No setup is needed: these names already have MX records pointing at the Gateway.
+- **Via custom domain**: `user@<custom-domain>` (e.g., `user@id.ai`). The domain must be registered as an IC custom domain (the Gateway uses the same registry as the HTTP gateway), and its MX records must point at the Gateway. A subdomain that is a CNAME to `<domain>.icp1.io`, as the custom domain setup requires, already inherits the Gateway's MX records through the CNAME. An apex domain cannot be a CNAME and needs its own MX records.
+
+The Gateway passes the local part (`user`) to the canister verbatim; interpreting it is up to the canister.
+
+#### Handing mail to another canister
+
+Before delivering, the Gateway fetches `https://<canister-id>.icp0.io/.well-known/ic-smtp-canister-id` for the addressed canister. If the response is a 2xx whose body, with whitespace trimmed, is a principal, all SMTP calls for that canister go to the named canister instead. Any failure falls back to the addressed canister, and the result is cached for 10 minutes. This lets a frontend canister that serves a domain hand the domain's mail to a backend canister.
+
+### Restricting who delivers mail
+
+The SMTP methods are public canister methods: any principal can call them, not only a gateway. A canister that wants to restrict who may deliver mail can check the caller's principal. For example, to accept mail only through the SMTP Gateway operated by DFINITY, allow only its principal `ttvgm-eefjs-h2pqz-huxqk-ld2c3-rcwbm-a2tik-35hex-pm2jn-l6glo-oae`. For other gateways, ask the operator for their principal, or don't restrict callers. Reject unauthorized callers by returning error 530, not by trapping: a trap is treated as a temporary failure.
+
+### What a canister receives
+
+- **Header values are raw, header names are not.** Each `Header.value` is the field body exactly as sent: the leading space, the terminating CRLF, folded lines and RFC 2047 encoded words are all kept. Names the gateway recognizes are normalized to canonical case (`fRoM` arrives as `From`), so compare names case-insensitively, and verify DKIM with `relaxed` header canonicalization: the original header bytes cannot always be reconstructed. A header whose value is not valid UTF-8 is omitted.
+- **The body is raw.** The bytes after the header block, without any MIME processing.
+- **`message_id` identifies one delivery attempt, not one email.** A retry by the sending server arrives with a new `message_id`, so delivery is at-least-once.
+- **`gateway_flags` is reserved.** No flags are defined yet, and the Gateway does not set it.
 
 ## Repository Structure
 
@@ -73,8 +90,8 @@ The crate's test module doubles as an executable specification: it pins the Cand
 
 The full Candid interface is defined in [`candid/smtp_gateway.did`](./candid/smtp_gateway.did). A canister must implement the following service to receive emails:
 
-- `smtp_request_validate(SmtpRequest) -> (SmtpResponse) query` — Pre-validates an upcoming email delivery.
-- `smtp_request(SmtpRequest) -> (SmtpResponse)` — Processes and delivers the email to the canister.
+- `smtp_request_validate(SmtpRequest) -> (SmtpResponse) query` — Checks during `RCPT TO` whether one recipient is deliverable; only `envelope` is set. Required: without it the Gateway rejects every recipient.
+- `smtp_request(SmtpRequest) -> (SmtpResponse)` — Delivers the message: envelope, headers, raw body and `message_id`.
 
 Optionally, to receive messages too large for a single ingress message:
 

@@ -3,39 +3,55 @@
 // This file defines the interface that a canister must implement
 // in order to receive emails via the SMTP Gateway.
 
-// Examples:
-//   record { name = "From"; value = "alice@example.com" };
-//   record { name = "To"; value = "verify@id.ai" };
-//   record { name = "Subject"; value = "Your verification code" };
-//   record { name = "DKIM-Signature"; value = "v=1; a=rsa-sha256; d=example.com; ..." };
+// One header field of the message.
+//
+// Examples (the leading space and the line ending are part of the value):
+//   record { name = "From"; value = " alice@example.com\r\n" };
+//   record { name = "To"; value = " verify@id.ai\r\n" };
+//   record { name = "Subject"; value = " =?UTF-8?Q?Jos=C3=A9?= sent you a code\r\n" };
+//   record { name = "DKIM-Signature"; value = " v=1; a=rsa-sha256; d=example.com; ...\r\n" };
 type Header = record {
+    // The field name. Names the gateway's parser recognizes (From, To,
+    // Subject, DKIM-Signature, ...) are normalized to their canonical case, so
+    // "fRoM" arrives as "From"; other names arrive as sent. Compare names
+    // case-insensitively.
     name : text;
 
-    // The decoded value of the header, as specified by the sender.
+    // The raw field body: everything after the colon, up to and including the
+    // line ending that terminates the field. Leading whitespace, folded
+    // continuation lines and RFC 2047 encoded words are passed through as they
+    // are; nothing is trimmed, unfolded or decoded. Trim, unfold and decode on
+    // the canister side where needed.
     //
-    // Non-ascii header values must be decoded via RFC 2047 by the caller.
-    //
-    // Example: "José Pérez"
+    // Values are raw so that a canister can verify DKIM. Because names may be
+    // normalized, the original header bytes cannot always be reconstructed:
+    // verify with DKIM's `relaxed` header canonicalization, which lowercases
+    // names. `simple` canonicalization cannot be verified reliably.
     value : text;
 };
 
 type Message = record {
-    // Raw RFC 5322 headers
+    // The header fields in message order. Duplicates are kept. A field whose
+    // value is not valid UTF-8 is omitted.
     headers : vec Header;
 
-    // We do not support MIME, only simple text/plain messages; the body is a blob of bytes.
+    // The raw body: every byte after the blank line that ends the header
+    // block, with its CRLF line endings. The gateway does not process MIME,
+    // so a multipart message arrives with its boundaries and its base64 or
+    // quoted-printable parts still encoded.
     body : blob;
 };
 
-// Represents an email address, e.g., user@domain.
+// An envelope address, e.g. user@domain.
 type Address = record {
-    // The decoded value of the user, as specified on the envelope.
+    // The local part exactly as given in MAIL FROM or RCPT TO: case, quotes
+    // and "+tag" suffixes are kept. The gateway rejects non-ASCII local parts.
     //
-    // Non-ascii header values must be decoded via RFC 2047 by the caller.
-    //
-    // Example: "josé.pérez"
+    // Example: "Jane.Doe+news"
     user : text;
 
+    // The domain in ASCII (internationalized domains in their punycode form),
+    // lowercased, without a trailing dot.
     domain : text;
 };
 
@@ -51,11 +67,17 @@ type Envelope = record {
     // A single delivery can carry several recipients: when more than one
     // recipient of a message resolves to the same canister, the gateway sends
     // one request listing them all rather than one request per recipient.
+    // `smtp_request_validate` always receives exactly one recipient.
     to : vec Address;
 };
 
-// A request to `smtp_request_validate` carries only `envelope`. A request to
-// `smtp_request` carries `envelope`, `message` and `message_id`.
+// A request to `smtp_request_validate` carries only `envelope`, with exactly
+// one recipient. A request to `smtp_request` carries `envelope`, `message` and
+// `message_id`.
+//
+// Every field is `opt`, which makes this record a Candid supertype of ANY
+// record: an unrelated argument decodes into it with every field null instead
+// of failing. Check that the fields you need are present.
 type SmtpRequest = record {
     message : opt Message;
 
@@ -63,9 +85,12 @@ type SmtpRequest = record {
     // to determine where to send emails.
     envelope : opt Envelope;
 
-    // Flags set by the gateway, indicating facts about the message.
+    // Reserved for flags the gateway sets to state facts about the message,
+    // for example that a DNSSEC signature was present and valid.
     //
-    // For example, there may be a flag to indicate whether a DNSSEC signature was present and valid.
+    // No flags are defined yet, and the gateway does not set this field.
+    // Canisters must not depend on it. In particular, the outcome of sender
+    // checks the gateway performs (such as SPF or DKIM) is not reported here.
     gateway_flags : opt vec text;
 
     // Gateway-assigned identifier for one delivery attempt.
@@ -79,6 +104,15 @@ type SmtpRequest = record {
     //    them. For that it must be unique per delivery attempt, and canisters
     //    must key upload state on `message_id`.
     //
+    // It identifies an attempt, not an email. The gateway generates a new value
+    // for every SMTP transaction, so when the sending MTA retries a message
+    // after a temporary failure, the retry arrives with a NEW `message_id`.
+    // Delivery is therefore at-least-once: a lost reply or a timeout after the
+    // canister accepted the message leads to a second delivery under a
+    // different `message_id`. A canister that must not process a message twice
+    // has to deduplicate on the RFC 5322 Message-ID header, or make its
+    // processing idempotent.
+    //
     // The gateway always sets it on `smtp_request` and never on
     // `smtp_request_validate`, which shares this record - that is the only
     // reason it is `opt`. A canister may reject an `smtp_request` without it
@@ -91,10 +125,17 @@ type SmtpRequestError = record {
     //
     // - 400-499: transient. The gateway reports a temporary failure and the
     //            sending MTA retries the message later.
-    // - 500-599: permanent. The gateway bounces the message.
+    // - 500-599: permanent. The gateway reports a permanent failure and the
+    //            sending MTA bounces the message to its author.
     //
-    // A deterministic error reported outside the 5xx range therefore causes the
-    // sender to retry forever, so pick the class deliberately.
+    // Any other code is treated as transient, and so is a trap or a failed
+    // call. A deterministic error reported outside the 5xx range, or by
+    // trapping, therefore causes the sender to retry until it gives up, so
+    // return an error with a deliberately chosen class instead.
+    //
+    // Two call failures are permanent instead: the canister does not export
+    // the method (it does not implement the protocol), and the request is too
+    // large for a single ingress message (HTTP 413).
     //
     // 550 is reserved: the gateway reads it as "unknown mailbox" and rejects
     // that one recipient during RCPT TO, rather than failing the message.
@@ -103,6 +144,7 @@ type SmtpRequestError = record {
     //
     //   550  no such mailbox                      permanent
     //   501  malformed request (missing fields)    permanent
+    //   530  caller not authorized                 permanent
     //   552  message exceeds the advertised limit  permanent
     //   504  unsupported upload protocol version   permanent
     //   554  digest mismatch / malformed chunk     permanent
@@ -111,6 +153,9 @@ type SmtpRequestError = record {
     //        message_id collision                  transient
     //   452  too many uploads / out of buffer      transient
     code : nat64;
+
+    // Copied into the SMTP reply line sent to the sending MTA. Keep it short,
+    // single-line ASCII, and do not echo request content into it.
     message : text;
 };
 
@@ -162,13 +207,14 @@ type SmtpResponse = variant {
 //  * keep the upload intact when a commit fails validation - the missing
 //    chunks may still arrive;
 //  * make `smtp_upload_commit` IDEMPOTENT by retaining the terminal verdict per
-//    `message_id` and returning it for a repeated commit. If the
-//    reply to a commit is lost, the gateway cannot tell whether the message was
-//    delivered; without the retained verdict the retry reports failure, the
-//    sending MTA re-sends, and the message is delivered twice;
-//  * authorize the caller by RETURNING 530, not by trapping. A trap is
-//    reported as a transient failure, so an unauthorized sender would retry
-//    forever instead of being rejected;
+//    `message_id` and returning it for a repeated commit and from
+//    `smtp_upload_status`. If the reply to a commit is lost, the gateway asks
+//    `smtp_upload_status` whether the message was delivered; without the
+//    retained verdict it has to report a temporary failure, the sending MTA
+//    re-sends, and the message is delivered twice;
+//  * if it restricts callers, reject unauthorized ones by RETURNING 530, not by
+//    trapping. A trap is reported as a transient failure, so an unauthorized
+//    sender would retry forever instead of being rejected;
 //  * bound its own resources: cap concurrent uploads and buffered bytes per
 //    caller (452 when over), and expire uploads that are never committed.
 
@@ -291,12 +337,21 @@ type SmtpUploadStatusResponse = variant {
 };
 
 service : {
-    // Allows to pre-validate an upcoming call to `smtp_request` for optimization purposes.
-    // Note that `smtp_request` should perform at least the same checks as `smtp_request_validate`,
-    // since the former may expire by the time the latter is executed.
-    // For example, this may return `SmtpRequestError { code = 550; message = "User doesn't exist" }`
+    // Required. Called once per recipient during RCPT TO, before the message
+    // is transferred, with only `envelope` set (exactly one recipient). Its
+    // answer decides whether the gateway accepts that recipient, for example
+    // `SmtpRequestError { code = 550; message = "no such mailbox" }`.
+    //
+    // A canister that does not export this method cannot receive mail: the
+    // gateway rejects every recipient for it permanently.
+    //
+    // `smtp_request` must repeat these checks, because the state they relied
+    // on may have changed by the time the message is delivered.
     smtp_request_validate : (SmtpRequest) -> (SmtpResponse) query;
 
+    // Delivers the message. Called once per destination canister after DATA,
+    // with `envelope` (every recipient that resolved to this canister),
+    // `message` and `message_id` set.
     smtp_request : (SmtpRequest) -> (SmtpResponse);
 
     // --- Chunked upload. Optional; see the section above. ---

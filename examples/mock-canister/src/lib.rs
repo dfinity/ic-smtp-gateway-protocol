@@ -17,10 +17,8 @@
 //!    else retries it. A deterministic error outside 5xx retries forever.
 //!    `550` is reserved for "unknown mailbox".
 //!  * **Commit is idempotent.** If the reply to `smtp_upload_commit` is lost,
-//!    the gateway cannot tell whether the message was delivered - and the
-//!    sending MTA may also retry the whole message. Both need the terminal
-//!    verdict to still be available, so it is retained per
-//!    `(caller, message_id)`.
+//!    the gateway asks `smtp_upload_status`, so the terminal verdict is
+//!    retained per `(caller, message_id)`.
 //!  * **Authorization returns 530 rather than trapping.** A trap surfaces as a
 //!    transient failure, so an unauthorized sender would retry forever instead
 //!    of being rejected. A production canister would add `#[inspect_message]`
@@ -214,7 +212,7 @@ fn sweep_expired(state: &mut State, now: u64) {
     // Verdicts share the upload TTL but count from completion, so each one
     // outlives its commit by a full TTL. It only has to last until the gateway
     // has resolved a commit whose reply it lost, so `upload_ttl_secs` must
-    // exceed the gateway's commit retry window.
+    // exceed the gateway's delivery timeout.
     state
         .completed
         .retain(|_, c| now.saturating_sub(c.at_secs) < ttl);
@@ -281,9 +279,8 @@ fn init(init_arg: InitArg) {
 
 /// Delivers a message that fits into a single ingress message.
 ///
-/// Deduplicated by `(caller, message_id)` for the same reason commit is: the
-/// gateway has no ambiguity handling on this path, so a lost reply would
-/// otherwise become a duplicate delivery when the sending MTA retries.
+/// A repeated call with the same `(caller, message_id)` returns the retained
+/// verdict. MTA retries are not caught: they arrive with a new `message_id`.
 #[update]
 fn smtp_request(req: SmtpRequest) -> SmtpResponse {
     with_state_mut(|state| {
