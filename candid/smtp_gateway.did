@@ -203,9 +203,9 @@ type SmtpResponse = variant {
 //    `smtp_upload_status` whether the message was delivered; without the
 //    retained verdict it has to report a temporary failure, the sending MTA
 //    re-sends, and the message is delivered twice;
-//  * authorize the caller by RETURNING 530, not by trapping. A trap is
-//    reported as a transient failure, so an unauthorized sender would retry
-//    forever instead of being rejected;
+//  * if it restricts callers, reject unauthorized ones by RETURNING 530, not by
+//    trapping. A trap is reported as a transient failure, so an unauthorized
+//    sender would retry forever instead of being rejected;
 //  * bound its own resources: cap concurrent uploads and buffered bytes per
 //    caller (452 when over), and expire uploads that are never committed.
 

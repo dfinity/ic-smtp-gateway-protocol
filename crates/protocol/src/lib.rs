@@ -10,33 +10,26 @@
 //! # Reply codes are part of the interface
 //!
 //! `SmtpRequestError::code` carries an SMTP reply code, and the gateway acts on
-//! its *class*: `500..600` is a permanent failure and the mail bounces,
-//! everything else is temporary and the sending MTA retries. A trap or a failed
-//! call is temporary too. A deterministic error reported outside the 5xx range,
-//! or by trapping, therefore produces a retry loop. `550` is reserved for
-//! "unknown mailbox" - the gateway maps it to a per-recipient rejection during
-//! `RCPT TO`.
+//! its *class*: `500..600` is a permanent failure and bounces the mail,
+//! everything else is temporary and the sending MTA retries. A deterministic
+//! error reported outside the 5xx range therefore produces an endless retry
+//! loop. `550` is reserved for "unknown mailbox" - the gateway maps it to a
+//! per-recipient rejection during `RCPT TO`.
 
 use candid::{CandidType, Deserialize};
 use sha2::{Digest, Sha256};
 
-/// Candid `Header`: one header field, exactly as it appeared in the message.
+/// Candid `Header`.
 #[derive(Clone, Debug, CandidType, Deserialize, Eq, PartialEq)]
 pub struct Header {
-    /// Field name as it appears in the message. Compare it case-insensitively.
     pub name: String,
-    /// Raw field body: everything after the colon, including leading
-    /// whitespace, folded continuation lines and the terminating line ending.
-    /// RFC 2047 encoded words are not decoded.
     pub value: String,
 }
 
 /// Candid `Message`.
 #[derive(Clone, Debug, CandidType, Deserialize, Eq, PartialEq)]
 pub struct Message {
-    /// Header fields in message order, duplicates kept.
     pub headers: Vec<Header>,
-    /// Raw body bytes after the header block. MIME is not processed.
     pub body: Vec<u8>,
 }
 
@@ -59,10 +52,7 @@ pub struct Envelope {
 pub struct SmtpRequest {
     pub message: Option<Message>,
     pub envelope: Option<Envelope>,
-    /// Reserved: no flags are defined yet, and the gateway does not set it.
     pub gateway_flags: Option<Vec<String>>,
-    /// Identifies one SMTP transaction, not one email: a retry by the sending
-    /// MTA arrives with a new value, so it cannot deduplicate redeliveries.
     pub message_id: Option<String>,
 }
 

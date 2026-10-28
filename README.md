@@ -50,9 +50,9 @@ The Gateway passes the local part (`user`) to the canister verbatim; interpretin
 
 Before delivering, the Gateway fetches `https://<canister-id>.icp0.io/.well-known/ic-smtp-canister-id` for the addressed canister. If the response is a 2xx whose body, with whitespace trimmed, is a principal, all SMTP calls for that canister go to the named canister instead. Any failure falls back to the addressed canister, and the result is cached for 10 minutes. This lets a frontend canister that serves a domain hand the domain's mail to a backend canister.
 
-### Gateway identity
+### Restricting who delivers mail
 
-The SMTP Gateway operated by DFINITY calls canisters as the principal `ttvgm-eefjs-h2pqz-huxqk-ld2c3-rcwbm-a2tik-35hex-pm2jn-l6glo-oae`. The SMTP methods are public canister methods that anyone can call, so a canister may restrict them to this principal. Reject other callers by returning error 530, not by trapping: a trap is treated as a temporary failure.
+The SMTP methods are public canister methods: any principal can call them, not only a gateway. A canister that wants to restrict who may deliver mail can check the caller's principal. For example, to accept mail only through the SMTP Gateway operated by DFINITY, allow only its principal `ttvgm-eefjs-h2pqz-huxqk-ld2c3-rcwbm-a2tik-35hex-pm2jn-l6glo-oae`. For other gateways, ask the operator for their principal, or don't restrict callers. Reject unauthorized callers by returning error 530, not by trapping: a trap is treated as a temporary failure.
 
 ### What a canister receives
 

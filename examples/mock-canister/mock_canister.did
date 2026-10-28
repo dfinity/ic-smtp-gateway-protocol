@@ -24,15 +24,8 @@ type Delivered = record {
 type DeliveryPath = variant { Chunked; SingleShot };
 // Candid `Envelope`.
 type Envelope = record { to : vec Address; from : Address };
-// Candid `Header`: one header field, exactly as it appeared in the message.
-type Header = record {
-  // Raw field body: everything after the colon, including leading
-  // whitespace, folded continuation lines and the terminating line ending.
-  // RFC 2047 encoded words are not decoded.
-  value : text;
-  // Field name as it appears in the message. Compare it case-insensitively.
-  name : text;
-};
+// Candid `Header`.
+type Header = record { value : text; name : text };
 // Fields are deliberately required rather than `opt`: a rename then fails at
 // install time instead of silently arriving as `None`.
 type InitArg = record {
@@ -47,12 +40,7 @@ type InitArg = record {
   mailboxes : vec text;
 };
 // Candid `Message`.
-type Message = record {
-  // Raw body bytes after the header block. MIME is not processed.
-  body : blob;
-  // Header fields in message order, duplicates kept.
-  headers : vec Header;
-};
+type Message = record { body : blob; headers : vec Header };
 // What a canister is willing to accept.
 // Returned by `smtp_capabilities`.
 type SmtpCapabilities = record {
@@ -65,10 +53,7 @@ type SmtpCapabilities = record {
 type SmtpRequest = record {
   envelope : opt Envelope;
   message : opt Message;
-  // Reserved: no flags are defined yet, and the gateway does not set it.
   gateway_flags : opt vec text;
-  // Identifies one SMTP transaction, not one email: a retry by the sending
-  // MTA arrives with a new value, so it cannot deduplicate redeliveries.
   message_id : opt text;
 };
 // Candid `SmtpRequestError`.
@@ -164,11 +149,7 @@ service : (InitArg) -> {
   // Delivers a message that fits into a single ingress message.
   // 
   // A repeated call with the same `(caller, message_id)` returns the retained
-  // verdict instead of delivering again. That does NOT catch retries by the
-  // sending MTA: the gateway assigns a new `message_id` to every SMTP
-  // transaction, so a retry after a lost reply arrives as a new delivery.
-  // Delivery is at-least-once; a canister that must not process a message twice
-  // has to deduplicate on the RFC 5322 `Message-ID` header.
+  // verdict. MTA retries are not caught: they arrive with a new `message_id`.
   smtp_request : (SmtpRequest) -> (SmtpResponse);
   // Probes whether a recipient is deliverable, during RCPT TO.
   // 
